@@ -175,5 +175,3 @@ This project is licensed under the MIT License.
 Made with ❤️ for writers who love AI assistance but hate inconsistency.
 
 ---
-
-Copy everything above and paste it into your `README.md` file. Let me know if you need any changes!
