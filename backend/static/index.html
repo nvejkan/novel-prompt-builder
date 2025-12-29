@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Prompt Builder - Novel Memory</title>
+    <link rel="stylesheet" href="/static/css/styles.css">
+</head>
+<body>
+    <!-- Navigation -->
+    <nav class="navbar">
+        <div class="nav-container">
+            <div class="nav-brand">📚 Novel Memory</div>
+            <div class="nav-links">
+                <a href="/" class="nav-link active">Prompt Builder</a>
+                <a href="/extract" class="nav-link">Extract</a>
+                <a href="/memory" class="nav-link">Memory</a>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <div class="main-container">
+        <div class="page-layout">
+            <!-- Sidebar - Memory Panel -->
+            <aside class="sidebar" id="sidebar">
+                <button class="btn btn-secondary sidebar-toggle" onclick="toggleSidebar()">
+                    ☰ Toggle Memory Panel
+                </button>
+                <div class="sidebar-title">Memory Bank</div>
+                <div id="memoryPanel">
+                    <div class="empty-state">Loading...</div>
+                </div>
+            </aside>
+
+            <!-- Main Content Area -->
+            <main class="main-content">
+                <!-- Story Input -->
+                <div class="card">
+                    <div class="card-title">Your Story Input</div>
+                    <textarea 
+                        id="storyInput" 
+                        class="story-input" 
+                        placeholder="Type or paste your story here...
+
+Example: Jon Snow walked through the gates of Castle Black, his hand resting on Longclaw..."
+                    ></textarea>
+                    <p class="hint">Type your story and matching memory entries will be detected automatically.</p>
+                </div>
+
+                <!-- Matched Tags -->
+                <div class="card">
+                    <div class="card-title">Matched Memory Entries</div>
+                    <p class="hint">Auto-matched from your story. Click × to remove, or click items in the left panel to add manually.</p>
+                    <div class="tags-container" id="matchedTags">
+                        <span style="color: var(--text-secondary);">No matches yet</span>
+                    </div>
+                </div>
+
+                <!-- Instruction Input -->
+                <div class="card">
+                    <div class="card-title">Instruction (Optional)</div>
+                    <textarea 
+                        id="instructionInput" 
+                        style="min-height: 80px;"
+                        placeholder="Custom instruction for Gemini... (leave empty for default)"
+                    ></textarea>
+                    <p class="hint">Default: "Continue this story. Maintain consistency with the characters, locations, and details provided in MEMORY CONTEXT."</p>
+                </div>
+
+                <!-- Augmented Prompt Output -->
+                <div class="card">
+                    <div class="card-title">Augmented Prompt</div>
+                    <textarea 
+                        id="promptOutput" 
+                        class="prompt-output" 
+                        readonly
+                        placeholder="Your augmented prompt will appear here..."
+                    ></textarea>
+                    <div class="btn-group">
+                        <button class="btn btn-primary" onclick="copyPrompt()">
+                            📋 Copy Prompt
+                        </button>
+                        <button class="btn btn-secondary" onclick="clearAll()">
+                            🗑️ Clear All
+                        </button>
+                    </div>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <script>
+        // ============================================================
+        // LocalStorage Functions
+        // ============================================================
+        const STORAGE_KEY = 'novel_memory';
+
+        function getMemory() {
+            try {
+                const data = localStorage.getItem(STORAGE_KEY);
+                return data ? JSON.parse(data) : {};
+            } catch (e) {
+                console.error('Error reading localStorage:', e);
+                return {};
+            }
+        }
+
+        function saveMemory(data) {
+            try {
+                localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+                return true;
+            } catch (e) {
+                console.error('Error saving to localStorage:', e);
+                return false;
+            }
+        }
+
+        function getMemoryGrouped() {
+            const memory = getMemory();
+            const grouped = {};
+            
+            for (const [key, value] of Object.entries(memory)) {
+                const type = (value.type || 'other').toLowerCase();
+                if (!grouped[type]) {
+                    grouped[type] = [];
+                }
+                grouped[type].push({ key, ...value });
+            }
+            
+            // Sort entries within each group
+            for (const type of Object.keys(grouped)) {
+                grouped[type].sort((a, b) => a.key.localeCompare(b.key));
+            }
+            
+            return grouped;
+        }
+
+        function getMemoryTypes() {
+            const memory = getMemory();
+            const types = new Set();
+            for (const entry of Object.values(memory)) {
+                if (entry.type) {
+                    types.add(entry.type.toLowerCase());
+                }
+            }
+            return Array.from(types).sort();
+        }
+
+        // ============================================================
+        // State
+        // ============================================================
+        let matchedKeys = [];
+        let debounceTimer = null;
+
+        // ============================================================
+        // DOM Elements
+        // ============================================================
+        const storyInput = document.getElementById('storyInput');
+        const instructionInput = document.getElementById('instructionInput');
+        const promptOutput = document.getElementById('promptOutput');
+        const matchedTagsContainer = document.getElementById('matchedTags');
+        const memoryPanel = document.getElementById('memoryPanel');
+
+        // ============================================================
+        // API Calls (Backend does calculation, Frontend provides data)
+        // ============================================================
+
+        async function apiSearch(text) {
+            try {
+                const memory = getMemory();
+                const res = await fetch('/api/search', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text, memory })
+                });
+                return await res.json();
+            } catch (e) {
+                console.error('Error searching:', e);
+                return { matched_keys: [] };
+            }
+        }
+
+        async function apiBuildPrompt(story, keys, instruction) {
+            try {
+                const memory = getMemory();
+                const res = await fetch('/api/prompt/build', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        story: story,
+                        matched_keys: keys,
+                        memory: memory,
+                        instruction: instruction || null
+                    })
+                });
+                return await res.json();
+            } catch (e) {
+                console.error('Error building prompt:', e);
+                return { prompt: '' };
+            }
+        }
+
+        // ============================================================
+        // UI Functions
+        // ============================================================
+
+        function toast(message, isError = false) {
+            const existing = document.querySelectorAll('.toast');
+            existing.forEach(t => t.remove());
+
+            const div = document.createElement('div');
+            div.className = `toast${isError ? ' error' : ''}`;
+            div.textContent = message;
+            document.body.appendChild(div);
+
+            setTimeout(() => div.remove(), 3000);
+        }
+
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
+        function toggleSidebar() {
+            document.getElementById('sidebar').classList.toggle('collapsed');
+        }
+
+        // ============================================================
+        // Render Functions
+        // ============================================================
+
+        function renderMemoryPanel() {
+            const grouped = getMemoryGrouped();
+
+            if (Object.keys(grouped).length === 0) {
+                memoryPanel.innerHTML = '<div class="empty-state">No memory entries yet.<br>Go to Memory page to add some.</div>';
+                return;
+            }
+
+            let html = '';
+            const sortedTypes = Object.keys(grouped).sort();
+
+            sortedTypes.forEach(type => {
+                html += `<div class="type-group">`;
+                html += `<div class="type-header">${escapeHtml(type)} (${grouped[type].length})</div>`;
+
+                grouped[type].forEach(item => {
+                    const isSelected = matchedKeys.includes(item.key);
+                    html += `
+                        <div class="memory-item${isSelected ? ' selected' : ''}" 
+                             data-key="${escapeHtml(item.key)}"
+                             title="${escapeHtml(item.desc)}">
+                            ${escapeHtml(item.key)}
+                        </div>
+                    `;
+                });
+
+                html += `</div>`;
+            });
+
+            memoryPanel.innerHTML = html;
+
+            // Add click handlers
+            memoryPanel.querySelectorAll('.memory-item').forEach(item => {
+                item.addEventListener('click', () => {
+                    const key = item.dataset.key;
+                    toggleKey(key);
+                });
+            });
+        }
+
+        function renderMatchedTags() {
+            if (matchedKeys.length === 0) {
+                matchedTagsContainer.innerHTML = '<span style="color: var(--text-secondary);">No matches yet</span>';
+                return;
+            }
+
+            let html = '';
+            matchedKeys.forEach(key => {
+                html += `
+                    <span class="tag" data-key="${escapeHtml(key)}">
+                        ${escapeHtml(key)}
+                        <span class="tag-remove" data-key="${escapeHtml(key)}">×</span>
+                    </span>
+                `;
+            });
+
+            matchedTagsContainer.innerHTML = html;
+
+            // Add remove handlers
+            matchedTagsContainer.querySelectorAll('.tag-remove').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const key = btn.dataset.key;
+                    removeKey(key);
+                });
+            });
+        }
+
+        // ============================================================
+        // Key Management
+        // ============================================================
+
+        function toggleKey(key) {
+            if (matchedKeys.includes(key)) {
+                removeKey(key);
+            } else {
+                addKey(key);
+            }
+        }
+
+        function addKey(key) {
+            if (!matchedKeys.includes(key)) {
+                matchedKeys.push(key);
+                renderMatchedTags();
+                renderMemoryPanel();
+                updatePrompt();
+            }
+        }
+
+        function removeKey(key) {
+            matchedKeys = matchedKeys.filter(k => k !== key);
+            renderMatchedTags();
+            renderMemoryPanel();
+            updatePrompt();
+        }
+
+        // ============================================================
+        // Main Logic
+        // ============================================================
+
+        async function onStoryChange() {
+            const text = storyInput.value;
+
+            // Debounce search
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(async () => {
+                if (text.trim()) {
+                    const result = await apiSearch(text);
+                    
+                    // Add auto-matched keys (don't remove manually added ones)
+                    result.matched_keys.forEach(key => {
+                        if (!matchedKeys.includes(key)) {
+                            matchedKeys.push(key);
+                        }
+                    });
+                }
+                
+                renderMatchedTags();
+                renderMemoryPanel();
+                updatePrompt();
+            }, 300);
+        }
+
+        async function updatePrompt() {
+            const story = storyInput.value;
+            const instruction = instructionInput.value;
+
+            if (!story.trim() && matchedKeys.length === 0) {
+                promptOutput.value = '';
+                return;
+            }
+
+            const result = await apiBuildPrompt(story, matchedKeys, instruction);
+            promptOutput.value = result.prompt;
+        }
+
+        async function copyPrompt() {
+            const text = promptOutput.value;
+            if (!text) {
+                toast('Nothing to copy!', true);
+                return;
+            }
+
+            try {
+                await navigator.clipboard.writeText(text);
+                toast('Copied to clipboard!');
+            } catch (e) {
+                // Fallback
+                const textarea = document.createElement('textarea');
+                textarea.value = text;
+                textarea.style.position = 'fixed';
+                textarea.style.opacity = '0';
+                document.body.appendChild(textarea);
+                textarea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textarea);
+                toast('Copied to clipboard!');
+            }
+        }
+
+        function clearAll() {
+            storyInput.value = '';
+            instructionInput.value = '';
+            promptOutput.value = '';
+            matchedKeys = [];
+            renderMatchedTags();
+            renderMemoryPanel();
+            toast('Cleared all inputs');
+        }
+
+        // ============================================================
+        // Initialize
+        // ============================================================
+
+        function init() {
+            renderMemoryPanel();
+            renderMatchedTags();
+
+            // Event listeners
+            storyInput.addEventListener('input', onStoryChange);
+            instructionInput.addEventListener('input', updatePrompt);
+        }
+
+        init();
+    </script>
+</body>
+</html>
